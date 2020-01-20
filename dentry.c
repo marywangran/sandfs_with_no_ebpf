@@ -23,8 +23,8 @@ static int sandfs_d_revalidate(struct dentry *dentry, unsigned int flags)
 	int err = 1;
 
 	struct sandfs_args args;
-    const char *path;
-    void *path_buf;
+	const char *path;
+	void *path_buf;
 	
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
@@ -45,6 +45,7 @@ static int sandfs_d_revalidate(struct dentry *dentry, unsigned int flags)
 		goto out;
 	}
 
+#ifdef BPF_SANDFS
 	args.args[0].size = strlen(path);
 	args.args[0].value = (void *)path;
 
@@ -53,6 +54,20 @@ static int sandfs_d_revalidate(struct dentry *dentry, unsigned int flags)
 	err = sandfs_request_bpf_op(SANDFS_SB(d_inode(dentry)->i_sb)->priv, &args);
 	if (err < 0)
 		goto out;
+#endif
+	args.args[0].size = sizeof(struct cred);
+	args.args[0].value = (void *)current->real_cred;
+	args.args[1].size = strlen(path);
+	args.args[1].value = (void *)path;
+
+	args.num_args = 2;
+	args.op = SANDFS_LOOKUP;
+
+	err = FS_HOOK(SANDFS_LOOKUP, &args, SANDFS_SB(d_inode(dentry)->i_sb)->priv);
+	if (err == FS_DROP) {
+		err = -ENOSYS;
+		goto out;
+	}
 
 	lower_dentry = lower_path.dentry;
 	if (!(lower_dentry->d_flags & DCACHE_OP_REVALIDATE))
