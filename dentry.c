@@ -65,7 +65,7 @@ static int sandfs_d_revalidate(struct dentry *dentry, unsigned int flags)
 
 	err = FS_HOOK(SANDFS_LOOKUP, &args, SANDFS_SB(d_inode(dentry)->i_sb)->priv);
 	if (err == FS_DROP) {
-		err = -ENOSYS;
+		err = -EPERM;
 		goto out;
 	}
 

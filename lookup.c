@@ -278,7 +278,7 @@ static struct dentry *__sandfs_lookup(struct inode *dir,
 		err = FS_HOOK(SANDFS_LOOKUP, &args, SANDFS_SB(dir->i_sb)->priv);
 		if (err == FS_DROP) {
 			vfree(path_buf);
-			err = -ENOSYS;
+			err = -EPERM;
 			goto out;
 		}
 

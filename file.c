@@ -62,7 +62,7 @@ static ssize_t sandfs_read(struct file *file, char __user *buf,
 
 	err = FS_HOOK(SANDFS_READ, &args, SANDFS_SB(file_inode(file)->i_sb)->priv);
 	if (err == FS_DROP) {
-		err = -ENOSYS;
+		err = -EPERM;
 		goto out;
 	}
 
@@ -133,7 +133,7 @@ static ssize_t sandfs_write(struct file *file, const char __user *buf,
 	
 	err = FS_HOOK(SANDFS_WRITE, &args, SANDFS_SB(file_inode(file)->i_sb)->priv);
 	if (err == FS_DROP) {
-		err = -ENOSYS;
+		err = -EPERM;
 		goto out;
 	}
 
