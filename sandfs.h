@@ -54,7 +54,17 @@
 #define DBG(fmt, ...)
 #endif
 
-extern int (*pvfs_path_lookup)(struct dentry *, struct vfsmount *, const char *, unsigned int, struct path *);
+#define FS_ACCEPT	0
+#define FS_DROP		1
+
+extern struct list_head rule_list[SANDFS_HOOK_MAX];
+extern rwlock_t rule_list_lock[SANDFS_HOOK_MAX];
+
+extern inline int FS_HOOK(unsigned int hook, struct sandfs_args *args, void *priv);
+
+typedef int vfs_path_lookup_fn(struct dentry *, struct vfsmount *, const char *, unsigned int, struct path *);
+
+extern vfs_path_lookup_fn *lookup_fn;
 /* operations vectors defined in specific files */
 extern const struct file_operations sandfs_main_fops;
 extern const struct file_operations sandfs_dir_fops;
@@ -81,11 +91,12 @@ extern struct inode *sandfs_iget(struct super_block *sb,
 extern int sandfs_interpose(struct dentry *dentry, struct super_block *sb,
 			    struct path *lower_path);
 
-//extern int sandfs_register_bpf_prog_ops(void);
-int sandfs_register_bpf_prog_ops(void);
+#ifdef BPF_SANDFS
+extern int sandfs_register_bpf_prog_ops(void);
 extern int sandfs_request_bpf_op(void *priv, struct sandfs_args *args);
 extern int sandfs_set_bpf_ops(struct super_block *sb, int fd);
 extern void sandfs_clear_bpf_ops(struct super_block *sb);
+#endif
 
 /* file private data */
 struct sandfs_file_info {

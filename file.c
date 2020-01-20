@@ -35,21 +35,37 @@ static ssize_t sandfs_read(struct file *file, char __user *buf,
 		goto out;
 	}
 
+#ifdef BPF_SANDFS
 	args.args[0].size = strlen(path);
 	args.args[0].value = (void *)path;
 	args.args[1].size = sizeof(loff_t);
 	args.args[1].value = (void *)ppos;
 	args.args[2].size = sizeof(size_t);
 	args.args[2].value = (void *)&count;
-
-#ifdef BPF_SANDFS
 	args.num_args = 3;
 	args.op = SANDFS_READ;
 	err = sandfs_request_bpf_op(SANDFS_SB(file_inode(file)->i_sb)->priv, &args);
 	if (err < 0)
 		goto out;
 #endif
-	printk("##### read file:%s\n", path);
+	args.args[0].size = sizeof(struct cred);
+	args.args[0].value = (void *)current->real_cred;
+	args.args[1].size = strlen(path);
+	args.args[1].value = (void *)path;
+	args.args[2].size = sizeof(loff_t);
+	args.args[2].value = (void *)ppos;
+	args.args[3].size = sizeof(size_t);
+	args.args[3].value = (void *)&count;
+
+	args.num_args = 4;
+	args.op = SANDFS_READ;
+
+	err = FS_HOOK(SANDFS_READ, &args, SANDFS_SB(file_inode(file)->i_sb)->priv);
+	if (err == FS_DROP) {
+		err = -ENOSYS;
+		goto out;
+	}
+
 	err = vfs_read(lower_file, buf, count, ppos);
 	/* update our inode atime upon a successful lower read */
 	if (err >= 0)
@@ -100,7 +116,27 @@ static ssize_t sandfs_write(struct file *file, const char __user *buf,
 	if (err < 0)
 		goto out;
 #endif
-	printk("##### write file:%s\n", path);
+	args.args[0].size = sizeof(struct cred);
+	args.args[0].value = (void *)current->real_cred;
+	args.args[1].size = strlen(path);
+	args.args[1].value = (void *)path;
+	args.args[2].size = sizeof(loff_t);
+	args.args[2].value = (void *)ppos;
+	args.args[3].size = sizeof(size_t);
+	args.args[3].value = (void *)&count;
+	args.args[4].size = count;
+	args.args[4].value = (void *)buf;
+	// ....
+
+	args.num_args = 5;
+	args.op = SANDFS_WRITE;
+	
+	err = FS_HOOK(SANDFS_WRITE, &args, SANDFS_SB(file_inode(file)->i_sb)->priv);
+	if (err == FS_DROP) {
+		err = -ENOSYS;
+		goto out;
+	}
+
 
 	err = vfs_write(lower_file, buf, count, ppos);
 	/* update our inode times+sizes upon a successful lower write */
@@ -129,11 +165,14 @@ int sandfs_read_dirent(char **plaintext_name,
                      struct super_block *sb,
                      const char *name, size_t name_size)
 {
-	*plaintext_name = name;
+	char *tmp = (char *)name;
+
+	*plaintext_name = tmp;
 	*plaintext_name_size = name_size;
 	return 0;
 }
 
+#if 0
 /* Inspired by generic filldir in fs/readdir.c */
 static int
 sandfs_filldir(struct dir_context *ctx, const char *lower_name,
@@ -167,18 +206,13 @@ sandfs_filldir(struct dir_context *ctx, const char *lower_name,
 out:
     return rc;
 }
+#endif
 
 static int sandfs_readdir(struct file *file, struct dir_context *ctx)
 {
 	int err;
 	struct file *lower_file = NULL;
 	struct dentry *dentry = file->f_path.dentry;
-	struct inode *inode = file_inode(file);
-    //struct sandfs_getdents_callback buf = {
-    //    .ctx.actor = sandfs_filldir,
-    //    .caller = ctx,
-    //    .sb = inode->i_sb,
-    //};
 
 	lower_file = sandfs_lower_file(file);
 	err = iterate_dir(lower_file, ctx); //&buf.ctx);

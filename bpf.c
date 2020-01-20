@@ -9,11 +9,9 @@
 int sandfs_request_bpf_op(void *priv, struct sandfs_args *args)
 {
 
+#ifdef BPF_SANDFS
 	int ret = -ENOSYS;
 	
-#ifndef BPF_SANDFS
-	return 0;
-#else
 	struct bpf_prog *accel_prog;
 
 	if (!priv)
@@ -28,16 +26,16 @@ int sandfs_request_bpf_op(void *priv, struct sandfs_args *args)
 	}
 
 	return ret;
+#else
+	return 0;
 #endif
 }
 EXPORT_SYMBOL(sandfs_request_bpf_op);
 
 void sandfs_clear_bpf_ops(struct super_block *sb)
 {
+#ifdef BPF_SANDFS
 	struct bpf_prog *old_prog;
-#ifndef BPF_SANDFS
-	return ;
-#else
 
 	BUG_ON(!sb || !SANDFS_SB(sb) || !SANDFS_SB(sb)->priv);
 
@@ -48,18 +46,18 @@ void sandfs_clear_bpf_ops(struct super_block *sb)
 		bpf_prog_put(old_prog);
 
 	printk(KERN_INFO "Cleared SANDFS ops\n");
+#else
+	return;
 #endif
 }
 
 int sandfs_set_bpf_ops(struct super_block *sb, int fd)
 {
+#ifdef BPF_SANDFS
 	struct bpf_prog *prog = NULL;
 	struct bpf_prog *old_prog;
 	struct sandfs_sb_info *sbi;
 
-#ifndef BPF_SANDFS
-	return 0;
-#else
 	BUG_ON(!sb);
 
 	if (fd <= 0) {
@@ -86,6 +84,8 @@ int sandfs_set_bpf_ops(struct super_block *sb, int fd)
 		bpf_prog_put(old_prog);
 
 	printk(KERN_INFO "SANDFS bpf program updated\n");
+	return 0;
+#else
 	return 0;
 #endif
 }

@@ -16,7 +16,7 @@
 #include <linux/string.h>
 #include <linux/kallsyms.h>
 
-int (*pvfs_path_lookup)(struct dentry *, struct vfsmount *, const char *, unsigned int, struct path *);
+vfs_path_lookup_fn *lookup_fn;
 
 typedef enum sandfs_tokens {
 	SANDFS_OPT_PROG,
@@ -38,11 +38,82 @@ static const match_table_t tokens = {
 	{SANDFS_OPT_ERR, NULL}
 };
 
+struct list_head rule_list[SANDFS_HOOK_MAX];
+rwlock_t	rule_list_lock[SANDFS_HOOK_MAX];
+
+inline int FS_HOOK(unsigned int hook, struct sandfs_args *args, void *priv)
+{
+	int err = FS_ACCEPT;
+	struct vfs_rule *rule;
+	int handled = 0;
+	struct list_head list;
+	rwlock_t lock;
+
+	list = rule_list[hook];
+	lock = rule_list_lock[hook];
+
+	read_lock(&lock);
+	list_for_each_entry(rule, &list, list) {
+		if (!rule->func)
+			continue;
+		err = rule->func(hook, args, priv, &handled);
+		if (handled == 1) {
+			read_unlock(&lock);
+			return err;
+		}
+	}
+	read_unlock(&lock);
+	
+	return err; 
+}
+
+int sandfs_register_hook(struct vfs_rule *rule)
+{
+        int ret = 0;
+	unsigned int hooknum;
+	struct list_head list;
+	rwlock_t lock;
+
+        if (!rule->func) {
+                printk_ratelimited("%s does not implement required func.\n", rule->name);
+                return -EINVAL;
+        }
+
+	hooknum = rule->hooknum;
+	list = rule_list[hooknum];
+	lock = rule_list_lock[hooknum];
+
+	INIT_LIST_HEAD(&rule->list);
+
+	write_lock(&lock);
+	list_add_tail(&rule->list, &list);
+	write_unlock(&lock);
+
+	return ret;
+}
+EXPORT_SYMBOL(sandfs_register_hook);
+
+void sandfs_unregister_hook(struct vfs_rule *rule)
+{
+	unsigned int hooknum;
+	rwlock_t lock;
+
+	hooknum = rule->hooknum;
+	lock = rule_list_lock[hooknum];
+
+	write_lock(&lock);
+	list_del(&rule->list);
+	write_unlock(&lock);
+}
+EXPORT_SYMBOL(sandfs_unregister_hook);
+
 struct sandfs_options* sandfs_parse_options(char *options)
 {
 	char *p;
 	int token;
+#ifdef BPF_SANDFS
 	int fd;
+#endif
 	struct sandfs_options *opts;
 	substring_t args[MAX_OPT_ARGS];
 
@@ -98,7 +169,9 @@ static int sandfs_read_super(struct super_block *sb, void *raw_data, int silent)
 	struct path lower_path;
 	struct sandfs_mount_data *data = (struct sandfs_mount_data *)raw_data;
 	char *dev_name = data->dev_name;
+#ifdef BPD_SANDFS
 	struct sandfs_options *opts = NULL;
+#endif
 	struct inode *inode;
 
 	if (!dev_name) {
@@ -248,14 +321,95 @@ static struct file_system_type sandfs_fs_type = {
 };
 MODULE_ALIAS_FS(SANDFS_NAME);
 
+#define TEST
+#ifdef TEST
+
+static int test_read_func(unsigned int hook, struct sandfs_args *args, void *priv, int *handled)
+{
+	int ret = FS_ACCEPT;
+	struct sandfs_args *largs = args;
+	kuid_t id;
+	size_t count;
+	struct cred *cred;
+
+	cred = (struct cred *)largs->args[SANDFS_IDX_CRED].value;
+	id = cred->uid;
+	count = *((size_t *)largs->args[SANDFS_IDX_COUNT].value);
+	if (id.val == 1000 && count > 10) {
+		printk("#### test read deny request\n");
+		ret = FS_DROP;
+	}
+	*handled = 1;
+	return ret;
+}
+
+static int test_write_func(unsigned int hook, struct sandfs_args *args, void *priv, int *handled)
+{
+	int ret = FS_ACCEPT;
+	struct sandfs_args *largs = args;
+	size_t count;
+	char *buf;
+
+	count = largs->args[SANDFS_IDX_BUF].size;
+	buf = (char *)largs->args[SANDFS_IDX_BUF].value;
+	if (strnstr(buf, "skinshoe", count)) {
+		printk("#### test write deny request\n");
+		ret = FS_DROP;
+	}
+	*handled = 1;
+	return ret;
+}
+
+static int test_lookup_func(unsigned int hook, struct sandfs_args *args, void *priv, int *handled)
+{
+	int ret = FS_ACCEPT;
+	struct sandfs_args *largs = args;
+	size_t len;
+	char *path;
+
+	len = largs->args[SANDFS_IDX_PATH].size;
+	path = (char *)largs->args[SANDFS_IDX_PATH].value;
+	if (!strncmp(path, "/key", len)) {
+		printk("#### test lookup deny request\n");
+		ret = FS_DROP;
+	}
+	*handled = 1;
+	return ret;
+}
+
+static struct vfs_rule test_read_rule = {
+	.name = "test read",
+	.func = test_read_func,
+	.hooknum = SANDFS_READ, 
+};
+
+static struct vfs_rule test_write_rule = {
+	.name = "test write",
+	.func = test_write_func,
+	.hooknum = SANDFS_WRITE, 
+};
+
+static struct vfs_rule test_lookup_rule = {
+	.name = "test lookup",
+	.func = test_lookup_func,
+	.hooknum = SANDFS_LOOKUP, 
+};
+#endif
+
 static int __init init_sandfs_fs(void)
 {
-	int err;
+	int err = 0;
+	int i;
 
 	pr_info("Registering sandfs " SANDFS_VERSION "\n");
 
-	pvfs_path_lookup = kallsyms_lookup_name("vfs_path_lookup");
-	if (!pvfs_path_lookup) 
+	for (i = 0; i < SANDFS_HOOK_MAX; i++) {
+		INIT_LIST_HEAD(&rule_list[i]);
+		rwlock_init(&rule_list_lock[i]);
+	}
+
+	lookup_fn = (vfs_path_lookup_fn *)kallsyms_lookup_name("vfs_path_lookup");
+	if (!lookup_fn) 
 		goto out;
 
 	err = sandfs_init_inode_cache();
@@ -271,6 +425,18 @@ static int __init init_sandfs_fs(void)
 	err = sandfs_register_bpf_prog_ops();
 #endif
 
+#ifdef TEST
+	err = sandfs_register_hook(&test_lookup_rule); 
+	if (err)
+		goto out;
+	err = sandfs_register_hook(&test_write_rule); 
+	if (err)
+		goto out;
+	err = sandfs_register_hook(&test_read_rule); 
+	if (err)
+		goto out;
+#endif
+
 out:
 	if (err) {
 		sandfs_destroy_inode_cache();
@@ -282,6 +448,11 @@ out:
 
 static void __exit exit_sandfs_fs(void)
 {
+#ifdef TEST
+	sandfs_unregister_hook(&test_lookup_rule); 
+	sandfs_unregister_hook(&test_write_rule); 
+	sandfs_unregister_hook(&test_read_rule); 
+#endif
 	sandfs_destroy_inode_cache();
 	sandfs_destroy_dentry_cache();
 	unregister_filesystem(&sandfs_fs_type);

@@ -230,7 +230,7 @@ static struct dentry *__sandfs_lookup(struct inode *dir,
 	lower_dir_mnt = lower_parent_path->mnt;
 
 	/* Use vfs_path_lookup to check if the dentry exists or not */
-	err = pvfs_path_lookup(lower_dir_dentry, lower_dir_mnt, name, flags,
+	err = lookup_fn(lower_dir_dentry, lower_dir_mnt, name, flags,
 			      &lower_path);
 
 	/* no error: handle positive dentries */
@@ -264,8 +264,24 @@ static struct dentry *__sandfs_lookup(struct inode *dir,
 			vfree(path_buf);
 			goto out;
 		}
-		printk("###### touch here\n");
 #endif
+		args.args[0].size = sizeof(struct cred);
+		args.args[0].value = (void *)current->real_cred;
+		args.args[1].size = strlen(path);
+		args.args[1].value = (void *)path;
+
+		args.num_args = 2;
+		args.op = SANDFS_LOOKUP;
+		/*
+		 *  return FS_HOOK(SANDFS_LOOKUP, args, SANDFS_SB(dir->i_sb)->priv, __sandfs_lookup2),;
+		 */
+		err = FS_HOOK(SANDFS_LOOKUP, &args, SANDFS_SB(dir->i_sb)->priv);
+		if (err == FS_DROP) {
+			vfree(path_buf);
+			err = -ENOSYS;
+			goto out;
+		}
+
 
 		sandfs_set_lower_path(dentry, &lower_path);
 		ret_dentry =
