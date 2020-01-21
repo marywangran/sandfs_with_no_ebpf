@@ -15,6 +15,12 @@
 #include <linux/parser.h>
 #include <linux/string.h>
 #include <linux/kallsyms.h>
+#include <linux/netlink.h>
+#include <net/sock.h>
+
+#define NETLINK_FSHOOK 31
+
+struct sock *nl_sk = NULL;
 
 vfs_path_lookup_fn *lookup_fn;
 
@@ -41,6 +47,36 @@ static const match_table_t tokens = {
 struct list_head rule_list[SANDFS_HOOK_MAX];
 rwlock_t	rule_list_lock[SANDFS_HOOK_MAX];
 
+static int gen_func(struct vfs_rule *rule, struct sandfs_args *args, void *priv, int *handled)
+{
+	int err = FS_ACCEPT;
+#if 0
+	struct rule_match match;
+	int num;
+	struct cred *cred;
+	kuid_t id;
+	unsigned int plen;
+
+	match = rule->match;
+	num = args->num_args;
+	if (num >= 2) {
+		cred = (struct cred *)largs->args[SANDFS_IDX_CRED].value;
+		id = cred->uid;
+		plen = largs->args[SANDFS_IDX_PATH].size;
+		path = (char *)largs->args[SANDFS_IDX_PATH].value;
+		if (num == 2 && match->uid == id.val && !strncmp(path, match->path, plen)) {
+			err = FS_DROP;
+			*handled = 1;
+		}
+	} 
+	if (num >= 4) {
+	} 
+	if (num >= 5) {
+	}		
+#endif
+	return err;
+}
+
 inline int FS_HOOK(unsigned int hook, struct sandfs_args *args, void *priv)
 {
 	int err = FS_ACCEPT;
@@ -54,9 +90,11 @@ inline int FS_HOOK(unsigned int hook, struct sandfs_args *args, void *priv)
 
 	read_lock(&lock);
 	list_for_each_entry(rule, &list, list) {
-		if (!rule->func)
-			continue;
-		err = rule->func(hook, args, priv, &handled);
+		if (!rule->func) {
+			err = gen_func(rule, args, priv, &handled);
+		} else {
+			err = rule->func(hook, args, priv, &handled);
+		}
 		if (handled == 1) {
 			read_unlock(&lock);
 			return err;
@@ -72,16 +110,22 @@ int sandfs_register_hook(struct vfs_rule *rule)
         int ret = 0;
 	unsigned int hooknum;
 	struct list_head list;
+	struct vfs_rule *r;
 	rwlock_t lock;
 
-        if (!rule->func) {
-                printk_ratelimited("%s does not implement required func.\n", rule->name);
-                return -EINVAL;
-        }
 
 	hooknum = rule->hooknum;
 	list = rule_list[hooknum];
 	lock = rule_list_lock[hooknum];
+
+	read_lock(&lock);
+	list_for_each_entry(r, &list, list) {
+		if (!strncmp(rule->name, r->name, DESC_MAX)) {
+			read_unlock(&lock);
+			return -EBUSY;
+		}
+	}
+	read_unlock(&lock);
 
 	INIT_LIST_HEAD(&rule->list);
 
@@ -93,17 +137,32 @@ int sandfs_register_hook(struct vfs_rule *rule)
 }
 EXPORT_SYMBOL(sandfs_register_hook);
 
-void sandfs_unregister_hook(struct vfs_rule *rule)
+struct vfs_rule *sandfs_unregister_hook(unsigned int hooknum, char *name)
 {
-	unsigned int hooknum;
+	struct vfs_rule *rule = NULL, *r;
+	struct list_head list;
 	rwlock_t lock;
 
-	hooknum = rule->hooknum;
+	list = rule_list[hooknum];
 	lock = rule_list_lock[hooknum];
+
+	read_lock(&lock);
+	list_for_each_entry(r, &list, list) {
+		if (!strncmp(rule->name, name, DESC_MAX)) {
+			rule = r;
+			break;
+		}
+	}
+	read_unlock(&lock);
+
+	if (rule == NULL)
+		return NULL;
 
 	write_lock(&lock);
 	list_del(&rule->list);
 	write_unlock(&lock);
+
+	return rule->_static?NULL:rule;
 }
 EXPORT_SYMBOL(sandfs_unregister_hook);
 
@@ -381,20 +440,62 @@ static struct vfs_rule test_read_rule = {
 	.name = "test read",
 	.func = test_read_func,
 	.hooknum = SANDFS_READ, 
+	._static = 1,
 };
 
 static struct vfs_rule test_write_rule = {
 	.name = "test write",
 	.func = test_write_func,
 	.hooknum = SANDFS_WRITE, 
+	._static = 1,
 };
 
 static struct vfs_rule test_lookup_rule = {
 	.name = "test lookup",
 	.func = test_lookup_func,
 	.hooknum = SANDFS_LOOKUP, 
+	._static = 1,
 };
 #endif
+
+static void rule_nl_recv_msg(struct sk_buff *skb) 
+{
+	struct rule_match *match;
+	struct vfs_rule *rule;
+	char *head;
+	char name[DESC_MAX] = {0};
+	int err = 0;
+
+	head = (char *)skb->data;
+	strncpy(name, head, DESC_MAX);
+	head += DESC_MAX;
+	match = (struct rule_match *)head;
+	printk(KERN_INFO "##### opt:%c hook:%x   uid:%x  path:%s  pos:%x  count:%x  buff:%s\n", 
+			match->option, 
+			match->hooknum, 
+			match->uid, 
+			match->path, 
+			match->pos, 
+			match->count, 
+			match->buff);
+
+	if (match->option == 'A') {
+		rule = kzalloc(sizeof(struct vfs_rule), GFP_KERNEL);
+		rule->hooknum = match->hooknum;
+		strcpy(&rule->name[0], name);
+		memcpy(&rule->match, match, sizeof(struct rule_match));
+		err = sandfs_register_hook(rule);
+	} else if (match->option == 'D') {
+		rule = sandfs_unregister_hook(match->hooknum, name);
+		if (rule) {
+			kfree(rule);
+		}
+	}
+}
+
+struct netlink_kernel_cfg rule_nl_cfg = {
+	.input = rule_nl_recv_msg,
+};
 
 static int __init init_sandfs_fs(void)
 {
@@ -436,6 +537,10 @@ static int __init init_sandfs_fs(void)
 	if (err)
 		goto out;
 #endif
+	nl_sk = netlink_kernel_create(&init_net, NETLINK_FSHOOK, &rule_nl_cfg);
+	if(!nl_sk) {
+		goto out;
+	}
 
 out:
 	if (err) {
@@ -448,10 +553,11 @@ out:
 
 static void __exit exit_sandfs_fs(void)
 {
+	netlink_kernel_release(nl_sk);
 #ifdef TEST
-	sandfs_unregister_hook(&test_lookup_rule); 
-	sandfs_unregister_hook(&test_write_rule); 
-	sandfs_unregister_hook(&test_read_rule); 
+	sandfs_unregister_hook(SANDFS_LOOKUP, "test_lookup"); 
+	sandfs_unregister_hook(SANDFS_WRITE, "test_write"); 
+	sandfs_unregister_hook(SANDFS_READ, "test_read"); 
 #endif
 	sandfs_destroy_inode_cache();
 	sandfs_destroy_dentry_cache();

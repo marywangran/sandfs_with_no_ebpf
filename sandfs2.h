@@ -47,12 +47,26 @@ struct sandfs_args {
 	struct sandfs_arg args[MAX_NUM_ARGS];
 };
 
+#pragma pack(1)
+struct rule_match {
+	unsigned char option;
+	unsigned int hooknum;
+	unsigned int uid;
+	char	path[32];
+	unsigned int pos;
+	unsigned int count;
+	char	buff[32];
+};	
+#pragma pack()
+
 #define DESC_MAX	32
 struct vfs_rule {
 	struct list_head list;
 	char name[DESC_MAX];
 	int (*func)(unsigned int, struct sandfs_args *, void *, int *);
 	unsigned int hooknum;
+	struct rule_match match;
+	int _static;
 	void *priv;
 };
 
